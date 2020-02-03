@@ -14,14 +14,17 @@ from torch.utils.data import DataLoader
 from utils.linear_models import predict_cv
 
 # ========== set input/output files ============
-dataset_name = 'hotel'  # FIXME: Notice to select the proper dataset
+dataset_name = 'dp_vehicle'
 model_name = 'socialWays'
-input_file = '../hotel-8-12.npz'
-model_file = '../trained_models/' + model_name + '-' + dataset_name + '.pt'
+train_input_file = 'data/dp_vehicle/train/data_10percent_4s_with_offset.npz'
+# train_input_file = 'data/dp_vehicle/train/data_4s_with_offset.npz'
+# train_input_file = 'data/dp_vehicle/test/data_4s_with_offset.npz'
+test_input_file = 'data/dp_vehicle/test/data_10percent_4s_with_offset.npz'
+model_file = 'trained_models/' + model_name + '-' + dataset_name + '.pt'
 
 # FIXME: ====== training hyper-parameters ======
 # Unrolled GAN
-n_unrolling_steps = 0
+n_unrolling_steps = 10
 # Info GAN
 use_info_loss = True
 loss_info_w = 0.5
@@ -31,8 +34,8 @@ use_l2_loss = False
 use_variety_loss = False
 loss_l2_w = 0.5  # WARNING for both l2 and variety
 # Learning Rate
-lr_g = 1E-3
-lr_d = 1E-4
+lr_g = 1E-3 / 2
+lr_d = 1E-4 / 2
 # FIXME: ====== Network Size ===================
 # Batch size
 batch_size = 256
@@ -49,43 +52,52 @@ use_social = False
 # FIXME: ======= Loda Data =====================
 print(os.path.dirname(os.path.realpath(__file__)))
 
-data = np.load(input_file)
+print("Loading training data...")
+train_data = np.load(train_input_file)
+print("Loaded training data.")
+print("Loading testing data...")
+test_data = np.load(test_input_file)
+print("Loaded testing data.")
 # Data come as NxTx2 numpy nd-arrays where N is the number of trajectories,
 # T is their duration.
-dataset_obsv, dataset_pred, dataset_t, the_batches = \
-    data['obsvs'], data['preds'], data['times'], data['batches']
-# 4/5 of the batches to be used for training
-train_size = max(1, (len(the_batches) * 4) // 5)
-train_batches = the_batches[:train_size]
-# Test batches are the remaining ones
-test_batches = the_batches[train_size:]
+train_dataset_obsv, train_dataset_pred, train_dataset_t, train_batches = \
+    train_data['obsvs'], train_data['preds'], train_data['times'], train_data['batches']
+test_dataset_obsv, test_dataset_pred, test_dataset_t, test_batches = \
+    test_data['obsvs'], test_data['preds'], test_data['times'], test_data['batches']
+
+train_size = len(train_batches)
 # Size of the observed sub-paths
-n_past = dataset_obsv.shape[1]
+n_past = train_dataset_obsv.shape[1]
 # Size of the sub-paths to predict
-n_next = dataset_pred.shape[1]
+n_next = train_dataset_pred.shape[1]
+assert n_next == 40
 # Number of training samples
-n_train_samples = the_batches[train_size - 1][1]
+n_train_samples = train_dataset_obsv.shape[0]
 # Number of testing samples (the remaining ones)
-n_test_samples = dataset_obsv.shape[0] - n_train_samples
-if n_test_samples == 0:
-    n_test_samples = 1
-    the_batches = np.array([the_batches[0], the_batches[0]])
-print(input_file, ' # Training samples: ', n_train_samples)
+n_test_samples = test_dataset_obsv.shape[0]
+assert n_train_samples > 0
+assert n_test_samples > 0
+print('# Training samples: ', n_train_samples)
+print('# Testing samples: ', n_test_samples)
 
 # Normalize the spatial data
 scale = Scale()
-scale.max_x = max(np.max(dataset_obsv[:, :, 0]), np.max(dataset_pred[:, :, 0]))
-scale.min_x = min(np.min(dataset_obsv[:, :, 0]), np.min(dataset_pred[:, :, 0]))
-scale.max_y = max(np.max(dataset_obsv[:, :, 1]), np.max(dataset_pred[:, :, 1]))
-scale.min_y = min(np.min(dataset_obsv[:, :, 1]), np.min(dataset_pred[:, :, 1]))
+scale.max_x = max(np.max(train_dataset_obsv[:, :, 0]), np.max(train_dataset_pred[:, :, 0]))
+scale.min_x = min(np.min(train_dataset_obsv[:, :, 0]), np.min(train_dataset_pred[:, :, 0]))
+scale.max_y = max(np.max(train_dataset_obsv[:, :, 1]), np.max(train_dataset_pred[:, :, 1]))
+scale.min_y = min(np.min(train_dataset_obsv[:, :, 1]), np.min(train_dataset_pred[:, :, 1]))
 scale.calc_scale(keep_ratio=True)
-dataset_obsv = scale.normalize(dataset_obsv)
-dataset_pred = scale.normalize(dataset_pred)
+train_dataset_obsv = scale.normalize(train_dataset_obsv)
+train_dataset_pred = scale.normalize(train_dataset_pred)
+test_dataset_obsv = scale.normalize(test_dataset_obsv)
+test_dataset_pred = scale.normalize(test_dataset_pred)
 ss = scale.sx
+print("ss", ss)
 # Copy normalized observations/paths to predict into torch GPU tensors
-dataset_obsv = torch.FloatTensor(dataset_obsv).cuda()
-dataset_pred = torch.FloatTensor(dataset_pred).cuda()
-
+train_dataset_obsv = torch.FloatTensor(train_dataset_obsv).cuda()
+train_dataset_pred = torch.FloatTensor(train_dataset_pred).cuda()
+test_dataset_obsv = torch.FloatTensor(test_dataset_obsv).cuda()
+test_dataset_pred = torch.FloatTensor(test_dataset_pred).cuda()
 
 # ================================================
 
@@ -355,6 +367,7 @@ print('hidden dim = %d | lr(G) =  %.5f | lr(D) =  %.5f' % (hidden_size, lr_g, lr
 def predict(obsv_p, noise, n_next, sub_batches=[]):
     # Batch size
     bs = obsv_p.shape[0]
+    # print("bs", bs)
     # Adds the velocity component to the observations.
     # This makes of obsv_4d a batch_sizexTx4 tensor
     obsv_4d = get_traj_4d(obsv_p, [])
@@ -405,26 +418,26 @@ def train():
     train_ADE, train_FDE = 0, 0
     batch_size_accum = 0;
     sub_batches = []
+    count = 0
     # For all the training batches
     for ii, batch_i in enumerate(train_batches):
         batch_size_accum += batch_i[1] - batch_i[0]
         sub_batches.append(batch_i)
 
-        # FIXME: Just keep it for toy dataset
-        # sub_batches = the_batches
-        # batch_size_accum = sub_batches[-1][1]
-        # ii = train_size-1
-
-        if ii >= train_size - 1 or \
-                batch_size_accum + (the_batches[ii + 1][1] - the_batches[ii + 1][0]) > batch_size:
+        if ii >= len(train_batches) - 1 or \
+                batch_size_accum + (train_batches[ii + 1][1] - train_batches[ii + 1][0]) > batch_size:
             # Observed partial paths
-            obsv = dataset_obsv[sub_batches[0][0]:sub_batches[-1][1]]
+            obsv = train_dataset_obsv[sub_batches[0][0]:sub_batches[-1][1]]
             # Future partial paths
-            pred = dataset_pred[sub_batches[0][0]:sub_batches[-1][1]]
+            pred = train_dataset_pred[sub_batches[0][0]:sub_batches[-1][1]]
+            count += obsv.size()[0]
+            max_diff = torch.max(torch.abs(torch.mean(obsv, dim=1) - torch.mean(pred, dim=1)))
+            assert max_diff < 1000.0
+            # print("max_diff", max_diff)
             sub_batches = sub_batches - sub_batches[0][0]
             # May have to fill with 0
             filling_len = batch_size - int(batch_size_accum)
-            #obsv = torch.cat((obsv, torch.zeros(filling_len, n_past, 2).cuda()), dim=0)
+            #obsv = torch.cat((obsv,[-] torch.zeros(filling_len, n_past, 2).cuda()), dim=0)
             #pred = torch.cat((pred, torch.zeros(filling_len, n_next, 2).cuda()), dim=0)
 
             bs = batch_size_accum
@@ -516,34 +529,37 @@ def train():
             batch_size_accum = 0;
             sub_batches = []
 
-    train_ADE /= n_train_samples
-    train_FDE /= n_train_samples
+    assert count == n_train_samples
+    train_ADE /= count
+    train_FDE /= count
     toc = time.clock()
     print(" Epc=%4d, Train ADE,FDE = (%.3f, %.3f) | time = %.1f" \
           % (epoch, train_ADE, train_FDE, toc - tic))
 
 
-def test(n_gen_samples=20, linear=False, write_to_file=None, just_one=False):
+def test(n_gen_samples=20):
     # =========== Test error ============
     plt.close()
     ade_avg_12, fde_avg_12 = 0, 0
     ade_min_12, fde_min_12 = 0, 0
+    batch_size_accum = 0;
+    sub_batches = []
+    count = 0
     for ii, batch_i in enumerate(test_batches):
-        if ii > 20: break
-        obsv = dataset_obsv[batch_i[0]:batch_i[1]]
-        pred = dataset_pred[batch_i[0]:batch_i[1]]
-        current_t = dataset_t[batch_i[0]]
-        bs = int(batch_i[1] - batch_i[0])
-        with torch.no_grad():
-            all_20_errors = []
-            all_20_preds = []
+        batch_size_accum += batch_i[1] - batch_i[0]
+        sub_batches.append(batch_i)
 
-            linear_preds = predict_cv(obsv, n_next)
-            if linear and not write_to_file:
-                all_20_preds.append(linear_preds.unsqueeze(0))
-                err_all = torch.pow((linear_preds[:, :, :2] - pred) / ss, 2).sum(dim=2, keepdim=True).sqrt()
-                all_20_errors.append(err_all.unsqueeze(0))
-            else:
+        if ii >= len(test_batches) - 1 or \
+                batch_size_accum + (test_batches[ii + 1][1] - test_batches[ii + 1][0]) > batch_size:
+            obsv = test_dataset_obsv[sub_batches[0][0]:sub_batches[-1][1]]
+            pred = test_dataset_pred[sub_batches[0][0]:sub_batches[-1][1]]
+            count += obsv.size()[0]
+            current_t = test_dataset_t[batch_i[0]]
+            bs = batch_size_accum
+            with torch.no_grad():
+                all_20_errors = []
+                all_20_preds = []
+
                 for kk in range(n_gen_samples):
                     noise = torch.FloatTensor(torch.rand(bs, noise_len)).cuda()
                     pred_hat_4d = predict(obsv, noise, n_next)
@@ -551,31 +567,25 @@ def test(n_gen_samples=20, linear=False, write_to_file=None, just_one=False):
                     err_all = torch.pow((pred_hat_4d[:, :, :2] - pred) / ss, 2).sum(dim=2, keepdim=True).sqrt()
                     all_20_errors.append(err_all.unsqueeze(0))
 
-            all_20_errors = torch.cat(all_20_errors)
-            if write_to_file:
-                file_name = os.path.join(write_to_file, str(epoch) + '-' + str(current_t) + '.npz')
-                print('saving to ', file_name)
-                np_obsvs = scale.denormalize(obsv[:, :, :2].data.cpu().numpy())
-                np_preds_our = scale.denormalize(torch.cat(all_20_preds)[:, :, :, :2].data.cpu().numpy())
-                np_preds_gtt = scale.denormalize(pred[:, :, :2].data.cpu().numpy())
-                np_preds_lnr = scale.denormalize(linear_preds[:, :, :2].data.cpu().numpy())
-                np.savez(file_name, timestamp=current_t,
-                         obsvs=np_obsvs, preds_our=np_preds_our, preds_gtt=np_preds_gtt, preds_lnr=np_preds_lnr)
+                all_20_errors = torch.cat(all_20_errors)
 
-            # =============== Prediction Errors ================
-            fde_min_12_i, _ = all_20_errors[:, :, -1].min(0, keepdim=True)
-            ade_min_12_i, _ = all_20_errors.mean(2).min(0, keepdim=True)
-            fde_min_12 += fde_min_12_i.sum().item()
-            ade_min_12 += ade_min_12_i.sum().item()
-            fde_avg_12 += all_20_errors[:, :, -1].mean(0, keepdim=True).sum().item()
-            ade_avg_12 += all_20_errors.mean(2).mean(0, keepdim=True).sum().item()
-            # ==================================================
-        if just_one: break
+                # =============== Prediction Errors ================
+                fde_min_12_i, _ = all_20_errors[:, :, -1].min(0, keepdim=True)
+                ade_min_12_i, _ = all_20_errors.mean(2).min(0, keepdim=True)
+                fde_min_12 += fde_min_12_i.sum().item()
+                ade_min_12 += ade_min_12_i.sum().item()
+                fde_avg_12 += all_20_errors[:, :, -1].mean(0, keepdim=True).sum().item()
+                ade_avg_12 += all_20_errors.mean(2).mean(0, keepdim=True).sum().item()
+                # ==================================================
 
-    ade_avg_12 /= n_test_samples
-    fde_avg_12 /= n_test_samples
-    ade_min_12 /= n_test_samples
-    fde_min_12 /= n_test_samples
+            batch_size_accum = 0;
+            sub_batches = []
+
+    assert n_test_samples == count
+    ade_avg_12 /= count
+    fde_avg_12 /= count
+    ade_min_12 /= count
+    fde_min_12 /= count
     print('Avg ADE,FDE (12)= (%.3f, %.3f) | Min(20) ADE,FDE (12)= (%.3f, %.3f)' \
           % (ade_avg_12, fde_avg_12, ade_min_12, fde_min_12))
 
@@ -583,7 +593,8 @@ def test(n_gen_samples=20, linear=False, write_to_file=None, just_one=False):
 # =======================================================
 # ===================== M A I N =========================
 # =======================================================
-if os.path.isfile(model_file):
+# if os.path.isfile(model_file):
+if False:
     print('Loading model from ' + model_file)
     checkpoint = torch.load(model_file)
     start_epoch = checkpoint['epoch'] + 1
@@ -607,7 +618,8 @@ else:
 # exit(1)
 
 # ===================== TRAIN =========================
-for epoch in trange(start_epoch, n_epochs + 1):  # FIXME : set the number of epochs
+print("Start the training loop.")
+for epoch in range(start_epoch, n_epochs + 1):  # FIXME : set the number of epochs
     # Main training function
     train()
 
@@ -626,7 +638,6 @@ for epoch in trange(start_epoch, n_epochs + 1):  # FIXME : set the number of epo
             'D_optimizer': D_optimizer.state_dict()
         }, model_file)
 
-    if epoch % 5 == 0:
-        wr_dir = '../medium/' + dataset_name + '/' + model_name + '/' + str(epoch)
-        os.makedirs(wr_dir, exist_ok=True)
-        test(128, write_to_file=wr_dir, just_one=True)
+    if epoch % 20 == 0:
+        test(n_gen_samples=3)
+        test(n_gen_samples=20)

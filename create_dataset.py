@@ -1,15 +1,19 @@
 import numpy as np
-from utils.parse_utils import BIWIParser, create_dataset
+from utils.parse_utils import BIWIParser, DpParser, create_dataset
 
-annot_file = 'path-to-dataset/obsmat.txt'   # FixMe: fix the input address
-npz_out_file = '../data-8-12.npz'           # FixMe: fix the output filename
-parser = BIWIParser()
+# eth data.
+# annot_file = 'data/ewap_dataset/seq_eth/obsmat.txt'
+# npz_out_file = 'data/ewap_dataset/seq_eth/data.npz'
+# parser = BIWIParser()
+
+# DP data.
+annot_file = 'data/dp_vehicle/train/*0.txt'
+npz_out_file = 'data/dp_vehicle/train/data_4s_with_offset.npz'
+parser = DpParser()
+
 parser.load(annot_file)
 
-obsvs, preds, times, batches = create_dataset(parser.p_data,
-                                              parser.t_data,
-                                              range(parser.t_data[0][0], parser.t_data[-1][-1], parser.interval),
-                                              8, 12)
+obsvs, preds, times, batches = create_dataset(parser, n_past=5, n_next=40)
 
 np.savez(npz_out_file, obsvs=obsvs, preds=preds, times=times, batches=batches)
 print('dataset was created successfully and stored in:', npz_out_file)

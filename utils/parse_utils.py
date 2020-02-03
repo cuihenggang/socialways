@@ -1,4 +1,6 @@
+from collections import defaultdict
 import csv
+import glob
 import math
 import sys
 from builtins import ValueError
@@ -21,6 +23,11 @@ class Scale(object):
         self.sx, self.sy = 1, 1
 
     def calc_scale(self, keep_ratio=True):
+        # Do not normalize DP data. Our scale is very large.
+        self.sx = 1.0
+        self.sy = 1.0
+        return
+
         self.sx = 1 / (self.max_x - self.min_x)
         self.sy = 1 / (self.max_y - self.min_y)
         if keep_ratio:
@@ -30,6 +37,9 @@ class Scale(object):
                 self.sy = self.sx
 
     def normalize(self, data, shift=True, inPlace=True):
+        # Do not normalize DP data. Our scale is very large.
+        return data
+
         if inPlace:
             data_copy = data
         else:
@@ -52,6 +62,9 @@ class Scale(object):
         return data_copy
 
     def denormalize(self, data, shift=True, inPlace=False):
+        # Do not normalize DP data. Our scale is very large.
+        return data
+
         if inPlace:
             data_copy = data
         else:
@@ -76,6 +89,99 @@ class Scale(object):
         return data_copy
 
 
+class DpParser:
+    def __init__(self):
+        self.scale = Scale()
+        self.all_ids = list()
+        self.actual_fps = 0.
+        self.delimit = ','
+        self.p_data = []
+        self.v_data = []
+        self.t_data = []
+        self.current_original_timestamp = None
+        self.current_parsed_timestamp = -1
+        self.interval = 1
+        self.time_actor_map = defaultdict(set)
+
+    def load(self, filename, down_sample=1):
+        pos_data_dict = dict()
+        time_data_dict = dict()
+        self.all_ids.clear()
+
+        # to search for files in a folder?
+        file_names = glob.glob(filename)
+
+        for file_idx, file in enumerate(file_names):
+            print("DpParser", float(file_idx) / len(file_names))
+            with open(file, 'r') as data_file:
+                content = data_file.readlines()
+                id_list = list()
+                pos_x_offset = None
+                pos_y_offset = None
+                for i, row in enumerate(content):
+                    row = row.split(self.delimit)
+                    while '' in row: row.remove('')
+                    if len(row) < 4: continue
+
+                    # This implementation needs the timestamps to be continuous, so we convert the timstamps.
+                    # For example, (1234.12, 1234.13., 1234.20, 2000.00) will become (1, 1, 2, 3).
+                    original_timestamp = int(round(float(row[0]) * 10.0))
+                    id = round(float(row[1]))
+                    px = float(row[2])
+                    py = float(row[3])
+
+                    # Decide whether to recompute the offset.
+                    if pos_x_offset is None or \
+                            self.current_original_timestamp is None or \
+                            abs(self.current_original_timestamp - original_timestamp) > 3000.0: # 5 minutes
+                        pos_x_offset = px
+                        pos_y_offset = py
+                    # The position values in the continuous frame is quite large. Let's subtract an offset from it.
+                    px -= pos_x_offset
+                    py -= pos_y_offset
+
+                    if original_timestamp != self.current_original_timestamp:
+                        self.current_original_timestamp = original_timestamp
+                        self.current_parsed_timestamp += 1
+                    ts = self.current_parsed_timestamp
+
+                    if id not in id_list:
+                        id_list.append(id)
+                        pos_data_dict[id] = list()
+                        time_data_dict[id] = np.empty(0, dtype=int)
+                    else:
+                        if time_data_dict[id][-1] != ts- 1:
+                            # Skip duplicate or incomplete observations.
+                            continue
+
+                    pos_data_dict[id].append(np.array([px, py]))
+                    time_data_dict[id] = np.hstack((time_data_dict[id], np.array([ts])))
+            self.all_ids += id_list
+
+        self.min_t = 0
+        self.max_t = self.current_parsed_timestamp
+
+        for actor_id, pos in pos_data_dict.items():
+            pos = np.array(pos)
+            self.p_data.append(pos)
+            self.t_data.append(np.array(time_data_dict[actor_id]))
+            for t in time_data_dict[actor_id]:
+                self.time_actor_map[t].add(len(self.t_data) - 1)
+
+        # calc scale
+        for i in range(len(self.p_data)):
+            poss_i = np.array(self.p_data[i])
+            self.scale.min_x = min(self.scale.min_x, min(poss_i[:, 0]))
+            self.scale.max_x = max(self.scale.max_x, max(poss_i[:, 0]))
+            self.scale.min_y = min(self.scale.min_y, min(poss_i[:, 1]))
+            self.scale.max_y = max(self.scale.max_y, max(poss_i[:, 1]))
+        print("self.scale.min_x", self.scale.min_x)
+        print("self.scale.max_x", self.scale.max_x)
+        print("self.scale.min_y", self.scale.min_y)
+        print("self.scale.max_y", self.scale.max_y)
+        self.scale.calc_scale()
+
+
 class TrajnetParser:
     def __init__(self):
         self.scale = Scale()
@@ -95,15 +201,7 @@ class TrajnetParser:
         self.all_ids.clear()
 
         # to search for files in a folder?
-        file_names = list()
-        if '*' in filename:
-            files_path = filename[:filename.index('*')]
-            extension = filename[filename.index('*') + 1:]
-            for file in os.listdir(files_path):
-                if file.endswith(extension):
-                    file_names.append(files_path + file)
-        else:
-            file_names.append(filename)
+        file_names = glob.glob(filename)
 
         for file in file_names:
             with open(file, 'r') as data_file:
@@ -169,15 +267,7 @@ class SDD_Parsrer:
             self.delimit = '\t'
 
         # to search for files in a folder?
-        file_names = list()
-        if '*' in filename:
-            files_path = filename[:filename.index('*')]
-            extension = filename[filename.index('*') + 1:]
-            for file in os.listdir(files_path):
-                if file.endswith(extension):
-                    file_names.append(files_path + file)
-        else:
-            file_names.append(filename)
+        file_names = glob.glob(filename)
 
         self.actual_fps = 2.5
         for file in file_names:
@@ -250,15 +340,7 @@ class BIWIParser:
             self.delimit = '\t'
 
         # to search for files in a folder?
-        file_names = list()
-        if '*' in filename:
-            files_path = filename[:filename.index('*')]
-            extension = filename[filename.index('*') + 1:]
-            for file in os.listdir(files_path):
-                if file.endswith(extension):
-                    file_names.append(files_path + file)
-        else:
-            file_names.append(filename)
+        file_names = glob.glob(filename)
 
         for file in file_names:
             if not os.path.exists(file):
@@ -343,15 +425,7 @@ class SeyfriedParser:
         time_data_list = list()
 
         # check to search for many files?
-        file_names = list()
-        if '*' in filename:
-            files_path = filename[:filename.index('*')]
-            extension = filename[filename.index('*')+1:]
-            for file in os.listdir(files_path):
-                if file.endswith(extension):
-                    file_names.append(files_path+file)
-        else:
-            file_names.append(filename)
+        file_names = glob.glob(filename)
 
         for file in file_names:
             with open(file, 'r') as data_file:
@@ -454,17 +528,23 @@ class SeyfriedParser:
 #     return agg.values
 
 
-def create_dataset(p_data, t_data, t_range, n_past=8, n_next=12):
+def create_dataset(parser, n_past, n_next):
     dataset_t0 = []
     dataset_x = []
     dataset_y = []
-    for t in range(t_range.start, t_range.stop, 1):
-        for i in range(len(t_data)):
-            t0_ind = (np.where(t_data[i] == t))[0]
-            tP_ind = (np.where(t_data[i] == t - t_range.step * n_past))[0]
-            tF_ind = (np.where(t_data[i] == t + t_range.step * (n_next - 1)))[0]
+    for t in range(parser.min_t, parser.max_t + parser.interval, parser.interval):
+        # print("create_dataset", float(t - parser.min_t) / (parser.max_t - parser.min_t))
+        if parser.time_actor_map is not None:
+            actor_ids = parser.time_actor_map[t]
+        else:
+            actor_ids = range(len(parser.t_data))
+        for i in actor_ids:
+            t0_ind = (np.where(parser.t_data[i] == t))[0]
+            tP_ind = (np.where(parser.t_data[i] == t - parser.interval * n_past))[0]
+            tF_ind = (np.where(parser.t_data[i] == t + parser.interval * (n_next - 1)))[0]
 
             if t0_ind.shape[0] == 0 or tP_ind.shape[0] == 0 or tF_ind.shape[0] == 0:
+                # Include only complete observations with n_past and n_next timestamps.
                 continue
 
             t0_ind = t0_ind[0]
@@ -472,9 +552,8 @@ def create_dataset(p_data, t_data, t_range, n_past=8, n_next=12):
             tF_ind = tF_ind[0]
 
             dataset_t0.append(t)
-            dataset_x.append(p_data[i][tP_ind:t0_ind])
-            dataset_y.append(p_data[i][t0_ind:tF_ind + 1])
-
+            dataset_x.append(parser.p_data[i][tP_ind:t0_ind])
+            dataset_y.append(parser.p_data[i][t0_ind:tF_ind + 1])
 
     sub_batches = []
     last_included_t = -1000
@@ -487,7 +566,7 @@ def create_dataset(p_data, t_data, t_range, n_past=8, n_next=12):
         if t == last_included_t:
             sub_batches[-1][1] = i + 1
 
-    sub_batches = np.array(sub_batches).astype(np.int16)
+    sub_batches = np.array(sub_batches).astype(np.int32)
     dataset_x_ = []
     dataset_y_ = []
     last_ind = 0
@@ -501,7 +580,7 @@ def create_dataset(p_data, t_data, t_range, n_past=8, n_next=12):
     dataset_x = np.concatenate(dataset_x_)
     dataset_y = np.concatenate(dataset_y_)
 
-    sub_batches = np.array(sub_batches).astype(np.int16)
+    sub_batches = np.array(sub_batches).astype(np.int32)
     dataset_x = np.array(dataset_x).astype(np.float32)
     dataset_y = np.array(dataset_y).astype(np.float32)
 
